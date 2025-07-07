@@ -68,10 +68,11 @@ EMAIL_CONFIG = {
     }
 }
 
-# Global variables for email monitoring
+# Global variables for email monitoring and approval workflow
 email_monitor_running = False
 processed_emails = set()
 recent_email_activity = []
+pending_responses = []  # New: Store responses pending approval
 
 def classify_email(sender_email, subject, content):
     """Classify incoming email using AI"""
@@ -122,10 +123,10 @@ def classify_email(sender_email, subject, content):
         
         result = json.loads(response.choices[0].message.content)
         
-        # Determine action based on classification
+        # NEW: All responses now require approval
         auto_respond_categories = ["volunteer_interest", "program_inquiry", "general_support"]
         if result["classification"] in auto_respond_categories and result["confidence"] > 70:
-            result["action"] = "auto_respond"
+            result["action"] = "generate_for_approval"  # Changed from "auto_respond"
         else:
             result["action"] = "human_review"
             
@@ -300,7 +301,7 @@ def fetch_new_emails(config):
 
 def process_emails():
     """Process new emails with AI"""
-    global recent_email_activity
+    global recent_email_activity, pending_responses
     
     for email_address, config in EMAIL_CONFIG.items():
         if not config.get('password'):
@@ -324,8 +325,8 @@ def process_emails():
                 
                 logger.info(f"Email classified as: {classification_result.get('classification', 'unknown')}")
                 
-                # Handle based on classification
-                if classification_result.get('action') == 'auto_respond':
+                # NEW: Handle approval workflow
+                if classification_result.get('action') == 'generate_for_approval':
                     response_body = generate_response(
                         classification_result['classification'],
                         sender_email,
@@ -333,23 +334,29 @@ def process_emails():
                         email_data['body']
                     )
                     
-                    if response_body:
-                        send_response(
-                            config=config,
-                            to_email=sender_email,
-                            subject=email_data['subject'],
-                            body=response_body,
-                            original_subject=email_data['subject']
-                        )
-                        
-                        logger.info(f"Auto-response sent to {sender_email}")
+                    # Add to pending responses instead of sending immediately
+                    pending_response = {
+                        'id': len(pending_responses) + 1,
+                        'sender': sender_email,
+                        'subject': email_data['subject'],
+                        'original_body': email_data['body'],
+                        'generated_response': response_body,
+                        'classification': classification_result['classification'],
+                        'confidence': classification_result.get('confidence', 0),
+                        'timestamp': datetime.now().isoformat(),
+                        'status': 'pending_approval',
+                        'account': email_data['account']
+                    }
+                    
+                    pending_responses.append(pending_response)
+                    logger.info(f"Response generated for approval: {sender_email}")
                 
                 # Add to recent activity
                 activity = {
                     'from': sender_email,
                     'subject': email_data['subject'],
                     'classification': classification_result.get('classification', 'unknown'),
-                    'status': 'auto_replied' if classification_result.get('action') == 'auto_respond' else 'human_review_required',
+                    'status': 'response_pending_approval' if classification_result.get('action') == 'generate_for_approval' else 'human_review_required',
                     'sentiment': classification_result.get('sentiment', 'neutral'),
                     'time': 'Just now',
                     'account': email_data['account']
@@ -392,32 +399,6 @@ MOCK_DATA = {
     "meetings_booked": 156,
     "response_rate": 68.5,
     "auto_reply_rate": 78.2,
-    "recent_emails": [
-        {
-            "from": "amina.hassan@gmail.com",
-            "subject": "Volunteer Opportunity Inquiry",
-            "classification": "volunteer_interest",
-            "status": "auto_replied",
-            "sentiment": "positive",
-            "time": "2 hours ago"
-        },
-        {
-            "from": "david.kimani@seattlefoundation.org", 
-            "subject": "Partnership Discussion",
-            "classification": "vip_contact",
-            "status": "human_review_required",
-            "sentiment": "neutral",
-            "time": "4 hours ago"
-        },
-        {
-            "from": "sarah.johnson@gmail.com",
-            "subject": "Program Information Request", 
-            "classification": "program_inquiry",
-            "status": "auto_replied",
-            "sentiment": "positive",
-            "time": "6 hours ago"
-        }
-    ],
     "upcoming_meetings": [
         {
             "name": "Grace Wanjiku",
@@ -437,7 +418,7 @@ MOCK_DATA = {
     ]
 }
 
-# HTML Template for Dashboard (same as before but with email monitoring status)
+# HTML Template for Dashboard with approval workflow
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -460,11 +441,17 @@ DASHBOARD_HTML = """
         .status-auto { border-left-color: #28a745; }
         .status-human { border-left-color: #ffc107; }
         .status-vip { border-left-color: #dc3545; }
+        .status-pending { border-left-color: #17a2b8; }
         .meeting-item { padding: 10px; border-bottom: 1px solid #eee; }
         .api-section { background: #e8f4fd; border: 1px solid #bee5eb; }
+        .approval-section { background: #fff3cd; border: 1px solid #ffeaa7; }
         .test-button { background: #667eea; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 5px; }
         .test-button:hover { background: #5a6fd8; }
+        .approve-button { background: #28a745; color: white; padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer; margin: 5px; }
+        .edit-button { background: #ffc107; color: black; padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer; margin: 5px; }
+        .reject-button { background: #dc3545; color: white; padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer; margin: 5px; }
         .response-box { background: #f8f9fa; border: 1px solid #dee2e6; padding: 15px; border-radius: 5px; margin-top: 10px; }
+        .pending-response { background: #e7f3ff; border: 1px solid #b3d9ff; padding: 15px; margin-bottom: 15px; border-radius: 5px; }
         .status-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; }
         .status-active { background-color: #28a745; }
         .status-inactive { background-color: #dc3545; }
@@ -491,10 +478,30 @@ DASHBOARD_HTML = """
                 <div class="stat-label">Auto Replies</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number">{{ data.meetings_booked }}</div>
-                <div class="stat-label">Meetings Booked</div>
+                <div class="stat-number">{{ pending_count }}</div>
+                <div class="stat-label">Pending Approval</div>
             </div>
         </div>
+        
+        {% if pending_responses %}
+        <div class="section approval-section">
+            <h3>📋 Responses Pending Your Approval</h3>
+            {% for response in pending_responses %}
+            <div class="pending-response">
+                <strong>To:</strong> {{ response.sender }}<br>
+                <strong>Subject:</strong> Re: {{ response.subject }}<br>
+                <strong>Classification:</strong> {{ response.classification }} ({{ response.confidence }}% confidence)<br>
+                <strong>Generated Response:</strong><br>
+                <div style="background: white; padding: 10px; margin: 10px 0; border-radius: 4px;">
+                    {{ response.generated_response }}
+                </div>
+                <button class="approve-button" onclick="approveResponse({{ response.id }})">✅ Approve & Send</button>
+                <button class="edit-button" onclick="editResponse({{ response.id }})">✏️ Edit</button>
+                <button class="reject-button" onclick="rejectResponse({{ response.id }})">❌ Reject</button>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
         
         <div class="section api-section">
             <h3>🧪 Test AI Features</h3>
@@ -502,19 +509,25 @@ DASHBOARD_HTML = """
             <button class="test-button" onclick="testClassification()">Test Email Classification</button>
             <button class="test-button" onclick="testResponse()">Test Auto Response</button>
             <button class="test-button" onclick="testVIPProtection()">Test VIP Protection</button>
+            {% if not email_monitoring %}
             <button class="test-button" onclick="startEmailMonitoring()">Start Email Monitoring</button>
+            {% endif %}
             <div id="test-results" class="response-box" style="display:none;"></div>
         </div>
         
         <div class="section">
             <h3>📧 Recent Email Activity</h3>
             <div id="email-activity">
-                {% for email in data.recent_emails %}
-                <div class="email-item status-{{ 'auto' if 'auto' in email.status else 'human' if 'human' in email.status else 'vip' }}">
-                    <strong>{{ email.from }}</strong> - {{ email.subject }}<br>
-                    <small>{{ email.classification }} | {{ email.status }} | {{ email.time }}</small>
-                </div>
-                {% endfor %}
+                {% if recent_emails %}
+                    {% for email in recent_emails %}
+                    <div class="email-item status-{{ 'pending' if 'pending' in email.status else 'auto' if 'auto' in email.status else 'human' if 'human' in email.status else 'vip' }}">
+                        <strong>{{ email.from }}</strong> - {{ email.subject }}<br>
+                        <small>{{ email.classification }} | {{ email.status }} | {{ email.time }}</small>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <p>No recent email activity. Send a test email to info@outreachandtransformlives.org to see it appear here!</p>
+                {% endif %}
             </div>
         </div>
         
@@ -533,9 +546,9 @@ DASHBOARD_HTML = """
             <p>✅ OpenAI API: Connected</p>
             <p><span class="status-indicator {{ 'status-active' if email_monitoring else 'status-inactive' }}"></span>Email Monitoring: {{ 'Active' if email_monitoring else 'Inactive' }}</p>
             <p>✅ VIP Protection: Enabled</p>
+            <p>✅ Approval Workflow: Active</p>
             <p>✅ Multi-Account Support: {{ data.email_accounts|length }} accounts configured</p>
             <p>✅ Response Rate: {{ data.response_rate }}%</p>
-            <p>✅ Auto-Reply Rate: {{ data.auto_reply_rate }}%</p>
         </div>
     </div>
     
@@ -583,7 +596,7 @@ DASHBOARD_HTML = """
                     })
                 });
                 const data = await response.json();
-                results.innerHTML = `<strong>Generated Response:</strong><br>${data.response}`;
+                results.innerHTML = `<strong>Generated Response (Would be sent for approval):</strong><br>${data.response}`;
             } catch (error) {
                 results.innerHTML = `Error: ${error.message}`;
             }
@@ -627,12 +640,57 @@ DASHBOARD_HTML = """
                 const data = await response.json();
                 results.innerHTML = `<strong>Email Monitoring:</strong><br>${data.message}`;
                 
-                // Refresh page after 2 seconds to show updated status
                 setTimeout(() => {
                     window.location.reload();
                 }, 2000);
             } catch (error) {
                 results.innerHTML = `Error: ${error.message}`;
+            }
+        }
+        
+        async function approveResponse(responseId) {
+            try {
+                const response = await fetch('/api/approve_response', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({id: responseId})
+                });
+                const data = await response.json();
+                alert(data.message);
+                window.location.reload();
+            } catch (error) {
+                alert('Error approving response: ' + error.message);
+            }
+        }
+        
+        async function rejectResponse(responseId) {
+            try {
+                const response = await fetch('/api/reject_response', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({id: responseId})
+                });
+                const data = await response.json();
+                alert(data.message);
+                window.location.reload();
+            } catch (error) {
+                alert('Error rejecting response: ' + error.message);
+            }
+        }
+        
+        function editResponse(responseId) {
+            // Simple edit functionality - could be enhanced with a modal
+            const newResponse = prompt('Edit the response:');
+            if (newResponse) {
+                fetch('/api/edit_response', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({id: responseId, new_response: newResponse})
+                }).then(response => response.json())
+                .then(data => {
+                    alert(data.message);
+                    window.location.reload();
+                });
             }
         }
         
@@ -643,19 +701,22 @@ DASHBOARD_HTML = """
                 const data = await response.json();
                 
                 const activityDiv = document.getElementById('email-activity');
-                activityDiv.innerHTML = '';
-                
-                data.recent_emails.forEach(email => {
-                    const statusClass = email.status.includes('auto') ? 'auto' : 
-                                       email.status.includes('human') ? 'human' : 'vip';
+                if (data.recent_emails && data.recent_emails.length > 0) {
+                    activityDiv.innerHTML = '';
                     
-                    activityDiv.innerHTML += `
-                        <div class="email-item status-${statusClass}">
-                            <strong>${email.from}</strong> - ${email.subject}<br>
-                            <small>${email.classification} | ${email.status} | ${email.time}</small>
-                        </div>
-                    `;
-                });
+                    data.recent_emails.forEach(email => {
+                        const statusClass = email.status.includes('pending') ? 'pending' :
+                                           email.status.includes('auto') ? 'auto' : 
+                                           email.status.includes('human') ? 'human' : 'vip';
+                        
+                        activityDiv.innerHTML += `
+                            <div class="email-item status-${statusClass}">
+                                <strong>${email.from}</strong> - ${email.subject}<br>
+                                <small>${email.classification} | ${email.status} | ${email.time}</small>
+                            </div>
+                        `;
+                    });
+                }
             } catch (error) {
                 console.log('Error refreshing activity:', error);
             }
@@ -673,10 +734,16 @@ def dashboard():
     data['email_accounts'] = OTL_CONFIG['email_accounts']
     
     # Use real recent activity if available
-    if recent_email_activity:
-        data['recent_emails'] = recent_email_activity
+    real_recent_emails = recent_email_activity if recent_email_activity else []
     
-    return render_template_string(DASHBOARD_HTML, data=data, email_monitoring=email_monitor_running)
+    return render_template_string(
+        DASHBOARD_HTML, 
+        data=data, 
+        email_monitoring=email_monitor_running,
+        recent_emails=real_recent_emails,
+        pending_responses=pending_responses,
+        pending_count=len(pending_responses)
+    )
 
 @app.route('/api/health')
 def health():
@@ -684,27 +751,27 @@ def health():
     return jsonify({
         "service": "OTL AI Email Agent",
         "status": "healthy",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "openai_configured": bool(os.getenv('OPENAI_API_KEY')),
         "accounts_configured": len(OTL_CONFIG['email_accounts']),
         "email_monitoring": email_monitor_running,
-        "email_password_configured": bool(os.getenv('EMAIL_PASSWORD_INFO'))
+        "email_password_configured": bool(os.getenv('EMAIL_PASSWORD_INFO')),
+        "pending_responses": len(pending_responses)
     })
 
 @app.route('/api/stats')
 def stats():
     """System statistics"""
     data = MOCK_DATA.copy()
-    if recent_email_activity:
-        data['recent_emails'] = recent_email_activity
+    data['recent_emails'] = recent_email_activity if recent_email_activity else []
+    data['pending_responses'] = len(pending_responses)
     return jsonify(data)
 
 @app.route('/api/recent_activity')
 def recent_activity():
     """Get recent email activity"""
     data = MOCK_DATA.copy()
-    if recent_email_activity:
-        data['recent_emails'] = recent_email_activity
+    data['recent_emails'] = recent_email_activity if recent_email_activity else []
     return jsonify(data)
 
 @app.route('/api/start_monitoring', methods=['POST'])
@@ -719,8 +786,76 @@ def start_monitoring():
     start_email_monitoring()
     return jsonify({
         "success": True,
-        "message": "Email monitoring started successfully!"
+        "message": "Email monitoring started successfully! Responses will be generated for your approval."
     })
+
+@app.route('/api/approve_response', methods=['POST'])
+def approve_response():
+    """Approve and send a pending response"""
+    global pending_responses
+    
+    data = request.json
+    response_id = data.get('id')
+    
+    # Find the pending response
+    pending_response = None
+    for i, resp in enumerate(pending_responses):
+        if resp['id'] == response_id:
+            pending_response = resp
+            break
+    
+    if not pending_response:
+        return jsonify({"success": False, "message": "Response not found"}), 404
+    
+    # Send the response
+    config = EMAIL_CONFIG.get(pending_response['account'])
+    if config:
+        success = send_response(
+            config=config,
+            to_email=pending_response['sender'],
+            subject=pending_response['subject'],
+            body=pending_response['generated_response'],
+            original_subject=pending_response['subject']
+        )
+        
+        if success:
+            # Remove from pending responses
+            pending_responses = [r for r in pending_responses if r['id'] != response_id]
+            return jsonify({"success": True, "message": "Response approved and sent successfully!"})
+        else:
+            return jsonify({"success": False, "message": "Failed to send response"}), 500
+    
+    return jsonify({"success": False, "message": "Email configuration not found"}), 500
+
+@app.route('/api/reject_response', methods=['POST'])
+def reject_response():
+    """Reject a pending response"""
+    global pending_responses
+    
+    data = request.json
+    response_id = data.get('id')
+    
+    # Remove from pending responses
+    pending_responses = [r for r in pending_responses if r['id'] != response_id]
+    
+    return jsonify({"success": True, "message": "Response rejected and removed."})
+
+@app.route('/api/edit_response', methods=['POST'])
+def edit_response():
+    """Edit a pending response"""
+    global pending_responses
+    
+    data = request.json
+    response_id = data.get('id')
+    new_response = data.get('new_response')
+    
+    # Find and update the pending response
+    for resp in pending_responses:
+        if resp['id'] == response_id:
+            resp['generated_response'] = new_response
+            return jsonify({"success": True, "message": "Response updated successfully!"})
+    
+    return jsonify({"success": False, "message": "Response not found"}), 404
 
 @app.route('/api/test/classify', methods=['POST'])
 def test_classify():
@@ -757,9 +892,9 @@ def process_email():
         data.get('content', '')
     )
     
-    # Generate response if appropriate
+    # Generate response if appropriate (but don't send - add to pending)
     response = None
-    if classification.get('action') == 'auto_respond':
+    if classification.get('action') == 'generate_for_approval':
         response = generate_response(
             classification['classification'],
             data.get('sender', ''),
